@@ -163,4 +163,38 @@ FROM (
 '
 WHERE metric_name = 'Databases Encrypted';
 
+UPDATE kpi_schema.kpi_measures 
+SET query_text = 
+'SELECT 
+    "APP_ID",
+    "JIRA_TICKET_NUMBER",
+    "REPORT_DATE",
+    "DB_SERVICENOW_ID",
+    fecha,
+    "ENCRYPTED"
+FROM (
+    SELECT DISTINCT
+        "DB_SERVICENOW_ID",
+        "REPORT_DATE",
+        "JIRA_TICKET_NUMBER",
+        fecha,
+        "ENCRYPTED",
+        "APP_ID"
+    FROM (
+        SELECT 
+            FIRST_VALUE("REPORT_DATE") OVER (PARTITION BY "DB_SERVICENOW_ID", "ENCRYPTED" ORDER BY "REPORT_DATE") AS fecha,
+            "DB_SERVICENOW_ID",
+            "JIRA_TICKET_NUMBER",
+            "REPORT_DATE",
+            "ENCRYPTED",
+            "APP_ID"
+        FROM "PISI_AUTOMATION"."DATABASE_ENCRYPTION_HISTORY"
+        WHERE "REPORT_DATE" BETWEEN ''2024-01-01'' AND ''2024-12-31''
+          AND "JIRA_TICKET_NUMBER" IS NOT NULL
+    ) x
+    WHERE fecha = "REPORT_DATE"
+      AND "ENCRYPTED" = 1
+      AND "REPORT_DATE" BETWEEN ''2024-01-01'' AND ''2024-12-31''
+) y'
+WHERE metric_name = 'Databases Encrypted';
 
