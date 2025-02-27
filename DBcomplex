@@ -115,3 +115,52 @@ SET query_text = (
 )
 WHERE metric_name = 'Databases Encrypted';
 
+
+
+
+
+
+
+UPDATE kpi_schema.kpi_measures
+SET query_text = E'
+WITH date_ranges AS (
+    SELECT 
+        DATE_TRUNC(\'month\', CURRENT_DATE) AS start_date,
+        DATE_TRUNC(\'month\', CURRENT_DATE) - INTERVAL \'1 month\' AS prev_start_date,
+        (DATE_TRUNC(\'month\', CURRENT_DATE) - INTERVAL \'1 day\') AS prev_end_date,
+        (DATE_TRUNC(\'month\', CURRENT_DATE) + INTERVAL \'1 month\' - INTERVAL \'1 day\') AS end_date
+)
+SELECT 
+    outer_query."DB_SERVICENOW_ID",
+    outer_query."JIRA_TICKET_NUMBER",
+    outer_query."REPORT_DATE",
+    outer_query."APP_ID",
+    outer_query."ENCRYPTED"
+FROM (
+    SELECT DISTINCT
+        inner_query."DB_SERVICENOW_ID",
+        inner_query."REPORT_DATE",
+        inner_query."JIRA_TICKET_NUMBER",
+        inner_query."ENCRYPTED",
+        inner_query."APP_ID"
+    FROM (
+        SELECT 
+            FIRST_VALUE(dh."REPORT_DATE") OVER (PARTITION BY dh."DB_SERVICENOW_ID", dh."ENCRYPTED" ORDER BY dh."REPORT_DATE") AS first_report_date,
+            dh."DB_SERVICENOW_ID",
+            dh."JIRA_TICKET_NUMBER",
+            dh."REPORT_DATE",
+            dh."ENCRYPTED",
+            dh."APP_ID"
+        FROM "PISI_AUTOMATION"."DATABASE_ENCRYPTION_HISTORY" dh
+        WHERE dh."REPORT_DATE" BETWEEN (SELECT prev_start_date FROM date_ranges) 
+          AND (SELECT prev_end_date FROM date_ranges)
+          AND dh."JIRA_TICKET_NUMBER" IS NOT NULL
+    ) inner_query
+    WHERE inner_query."REPORT_DATE" BETWEEN (SELECT start_date FROM date_ranges) 
+      AND (SELECT end_date FROM date_ranges)
+      AND inner_query."ENCRYPTED" = 1
+) outer_query;
+'
+WHERE metric_name = 'Databases Encrypted';
+
+
