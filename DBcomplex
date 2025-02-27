@@ -1,0 +1,72 @@
+SELECT COUNT("DB_SERVICENOW_ID") AS metric, 
+       date_trunc('month', report_date) AS mydate, 
+       cio
+FROM (
+    SELECT DISTINCT "DB_SERVICENOW_ID", 
+           "REPORT_DATE", 
+           "JIRA_TICKET_NUMBER", 
+           fecha, 
+           "ENCRYPTED", 
+           cio
+    FROM (
+        SELECT FIRST_VALUE("REPORT_DATE") OVER (
+                   PARTITION BY "DB_SERVICENOW_ID" 
+                   ORDER BY "REPORT_DATE"
+               ) AS fecha,
+               "DB_SERVICENOW_ID", 
+               "JIRA_TICKET_NUMBER", 
+               "REPORT_DATE", 
+               "ENCRYPTED",
+               SUBSTRING("APP_CIO" FROM POSITION('"' IN "APP_CIO") + 1) AS cio
+        FROM "PISI_AUTOMATION"."DATABASE_ENCRYPTION_HISTORY"
+        WHERE "REPORT_DATE" BETWEEN 
+                  date_trunc('month', current_date) - INTERVAL '2 month' 
+                  AND date_trunc('month', current_date) - INTERVAL '1 day'
+          AND "JIRA_TICKET_NUMBER" IS NOT NULL
+    ) AS x
+    WHERE fecha = "REPORT_DATE"
+      AND "ENCRYPTED" = 1
+      AND "REPORT_DATE" BETWEEN 
+            date_trunc('month', current_date) - INTERVAL '1 month' 
+            AND date_trunc('month', current_date) + INTERVAL '1 month' - INTERVAL '1 day'
+) AS y
+GROUP BY mydate, cio;
+
+
+
+
+
+WITH date_ranges AS (
+    SELECT 
+        DATE_TRUNC('month', start_date) AS start_date,
+        DATE_TRUNC('month', start_date) - INTERVAL '1 month' AS prev_start_date,
+        (DATE_TRUNC('month', start_date) - INTERVAL '1 day') AS prev_end_date,
+        DATE_TRUNC('month', start_date) + INTERVAL '1 month - 1 day' AS end_date
+)
+SELECT 
+    "DB_SERVICENOW_ID",
+    "JIRA_TICKET_NUMBER",
+    "REPORT_DATE",
+    "APP_ID",
+    "ENCRYPTED"
+FROM (
+    SELECT DISTINCT 
+        "DB_SERVICENOW_ID",
+        "REPORT_DATE",
+        "JIRA_TICKET_NUMBER",
+        "ENCRYPTED",
+        "APP_ID"
+    FROM (
+        SELECT 
+            FIRST_VALUE("REPORT_DATE") OVER (PARTITION BY "DB_SERVICENOW_ID", "ENCRYPTED" ORDER BY "REPORT_DATE") AS "REPORT_DATE",
+            "DB_SERVICENOW_ID",
+            "JIRA_TICKET_NUMBER",
+            "ENCRYPTED",
+            "APP_ID"
+        FROM "PISI_AUTOMATION"."DATABASE_ENCRYPTION_HISTORY"
+        WHERE "REPORT_DATE" BETWEEN (SELECT prev_start_date FROM date_ranges) AND (SELECT prev_end_date FROM date_ranges)
+          AND "JIRA_TICKET_NUMBER" IS NOT NULL
+    ) x
+    WHERE "REPORT_DATE" BETWEEN (SELECT start_date FROM date_ranges) AND (SELECT end_date FROM date_ranges)
+      AND "ENCRYPTED" = 1
+) y;
