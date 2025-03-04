@@ -1,4 +1,44 @@
 
+# **Process KPI Data - Now Runs Daily**
+def process_kpi(kpi, db, mssql, jira_proxy):
+    try:
+        kpi_tracking_data = []
+
+        # Set the date range to today and yesterday
+        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        yesterday = today - timedelta(days=1)
+
+        logger.info(f"Processing KPI: {kpi['metric_name']} for {yesterday.strftime('%Y-%m-%d')} to {today.strftime('%Y-%m-%d')}")
+
+        if kpi["datasource_name"] == "JIRA":
+            jql_query = kpi["query_text"].replace("{start_date}", yesterday.strftime("%Y/%m/%d")).replace("{end_date}", today.strftime("%Y/%m/%d"))
+            issues = jira_proxy.get_issues(jql_query)
+
+            for issue in issues:
+                kpi_tracking_data.append(
+                    (kpi["service_id"], kpi["configuration_id"], issue[2], kpi["metric_name"], issue[1], yesterday, today)
+                )
+
+        elif kpi["datasource_name"] == "SQL Server":
+            results = mssql.execute_query(kpi["query_text"])
+            for row in results:
+                kpi_tracking_data.append(
+                    (kpi["service_id"], kpi["configuration_id"], row["DISTRIBUTED_APP_ID"], kpi["metric_name"],
+                     row["PROBLEM_NUMBER"], yesterday, today)
+                )
+
+        elif kpi["datasource_name"] == "PostgreSQL":
+            results = db.execute_query(kpi["query_text"])
+            for row in results:
+                kpi_tracking_data.append(
+                    (kpi["service_id"], kpi["configuration_id"], row[0], kpi["metric_name"], row[2], yesterday, today)
+                )
+
+        
+
+
+
+
 import unittest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone
