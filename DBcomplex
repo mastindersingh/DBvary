@@ -1,3 +1,162 @@
+
+import unittest
+from unittest.mock import patch, MagicMock
+from datetime import datetime, timezone
+import kpi_automation.main as main
+
+
+class TestMain(unittest.TestCase):
+
+    @patch("kpi_automation.main.psycopg2.connect")
+    def test_postgresql_init_failure(self, mock_connect):
+        """Test PostgreSQL connection failure"""
+        mock_connect.side_effect = Exception("Connection failed")
+        with self.assertRaises(RuntimeError):
+            main.PostgreSQL({"pisi_db_server": "localhost", "pisi_db_port": "5432",
+                             "pisi_db_name": "test_db", "pisi_db_user": "user",
+                             "pisi_db_pass": "pass"})
+
+    @patch("kpi_automation.main.pymssql.connect")
+    def test_mssql_init_failure(self, mock_connect):
+        """Test MSSQL connection failure"""
+        mock_connect.side_effect = Exception("Connection failed")
+        with self.assertRaises(RuntimeError):
+            main.MSSQLDatabase({"eft_datamart_host": "localhost",
+                                "eft_datamart_port": "1433",
+                                "eft_datamart_instance": "instance",
+                                "pisi_service_user": "user",
+                                "pisi_service_pass": "pass",
+                                "eft_datamart_db_name": "test_db"})
+
+    @patch("kpi_automation.main.JIRA")
+    def test_jira_connection_failure(self, mock_jira):
+        """Test JIRA API connection failure"""
+        mock_jira.side_effect = Exception("JIRA connection failed")
+        with self.assertRaises(Exception):
+            main.JiraAPI("https://jira.example.com", "fake_token")
+
+    @patch("kpi_automation.main.PostgreSQL")
+    def test_fetch_kpi_measure_list(self, MockPostgreSQL):
+        """Test fetching KPI measure list from PostgreSQL"""
+        mock_pg_instance = MockPostgreSQL.return_value
+        mock_pg_instance.fetch_kpi_measure_list.return_value = [
+            {
+                "service_id": 1,
+                "configuration_id": 1,
+                "datasource_id": 1,
+                "metric_name": "Test Metric",
+                "query_text": "SELECT * FROM test_table",
+                "datasource_name": "PostgreSQL"
+            }
+        ]
+
+        result = mock_pg_instance.fetch_kpi_measure_list()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["metric_name"], "Test Metric")
+
+    @patch("kpi_automation.main.PostgreSQL")
+    @patch("kpi_automation.main.MSSQLDatabase")
+    @patch("kpi_automation.main.JiraAPI")
+    def test_process_kpi_postgresql(self, MockJiraAPI, MockMSSQLDatabase, MockPostgreSQL):
+        """Test KPI processing for PostgreSQL"""
+        mock_pg_instance = MockPostgreSQL.return_value
+        mock_pg_instance.fetch_kpi_measure_list.return_value = [
+            {
+                "service_id": 1,
+                "configuration_id": 1,
+                "datasource_id": 1,
+                "metric_name": "Test Metric",
+                "query_text": "SELECT * FROM test_table",
+                "datasource_name": "PostgreSQL"
+            }
+        ]
+        mock_pg_instance.execute_query.return_value = [
+            (1, "No Data", datetime.now(timezone.utc), "DB123", "CIO_NAME", 0)
+        ]
+
+        main.process_kpi(mock_pg_instance.fetch_kpi_measure_list()[0], mock_pg_instance, MockMSSQLDatabase, MockJiraAPI)
+
+        mock_pg_instance.insert_kpi_tracking.assert_called_once()
+
+    @patch("kpi_automation.main.PostgreSQL")
+    @patch("kpi_automation.main.MSSQLDatabase")
+    @patch("kpi_automation.main.JiraAPI")
+    def test_process_kpi_mssql(self, MockJiraAPI, MockMSSQLDatabase, MockPostgreSQL):
+        """Test KPI processing for MSSQL"""
+        mock_mssql_instance = MockMSSQLDatabase.return_value
+        mock_mssql_instance.execute_query.return_value = [
+            {"DISTRIBUTED_APP_ID": "DB123", "PROBLEM_NUMBER": 5}
+        ]
+
+        kpi = {
+            "service_id": 1,
+            "configuration_id": 1,
+            "datasource_id": 2,
+            "metric_name": "SQL Metric",
+            "query_text": "SELECT * FROM sql_table",
+            "datasource_name": "SQL Server"
+        }
+
+        main.process_kpi(kpi, MockPostgreSQL, mock_mssql_instance, MockJiraAPI)
+        mock_mssql_instance.execute_query.assert_called_once_with("SELECT * FROM sql_table")
+
+    @patch("kpi_automation.main.PostgreSQL")
+    @patch("kpi_automation.main.MSSQLDatabase")
+    @patch("kpi_automation.main.JiraAPI")
+    def test_process_kpi_jira(self, MockJiraAPI, MockMSSQLDatabase, MockPostgreSQL):
+        """Test KPI processing for JIRA"""
+        mock_jira_instance = MockJiraAPI.return_value
+        mock_jira_instance.get_issues.return_value = [
+            ("ISSUE-123", datetime.now(timezone.utc), "APP-456")
+        ]
+
+        kpi = {
+            "service_id": 1,
+            "configuration_id": 1,
+            "datasource_id": 3,
+            "metric_name": "JIRA Metric",
+            "query_text": "JQL QUERY STRING",
+            "datasource_name": "JIRA"
+        }
+
+        main.process_kpi(kpi, MockPostgreSQL, MockMSSQLDatabase, mock_jira_instance)
+        mock_jira_instance.get_issues.assert_called_once_with("JQL QUERY STRING")
+
+    @patch("kpi_automation.main.PostgreSQL")
+    def test_execute_query_failure(self, MockPostgreSQL):
+        """Test failure when executing a PostgreSQL query"""
+        mock_pg_instance = MockPostgreSQL.return_value
+        mock_pg_instance.execute_query.side_effect = Exception("Query failed")
+        with self.assertRaises(RuntimeError):
+            mock_pg_instance.execute_query("SELECT * FROM invalid_table")
+
+    @patch("kpi_automation.main.PostgreSQL")
+    def test_insert_kpi_tracking_failure(self, MockPostgreSQL):
+        """Test failure when inserting KPI tracking data"""
+        mock_pg_instance = MockPostgreSQL.return_value
+        mock_pg_instance.insert_kpi_tracking.side_effect = Exception("Insert failed")
+        with self.assertRaises(RuntimeError):
+            mock_pg_instance.insert_kpi_tracking([])
+
+    @patch("kpi_automation.main.PostgreSQL")
+    def test_fetch_datasource_properties(self, MockPostgreSQL):
+        """Test fetching datasource properties"""
+        mock_pg_instance = MockPostgreSQL.return_value
+        mock_pg_instance.fetch_datasource_properties.return_value = {
+            "property_name": "property_value"
+        }
+
+        properties = mock_pg_instance.fetch_datasource_properties(1)
+        mock_pg_instance.fetch_datasource_properties.assert_called_once_with(1)
+        self.assertEqual(properties, {"property_name": "property_value"})
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+
+
 SELECT COUNT("DB_SERVICENOW_ID") AS metric, 
        date_trunc('month', report_date) AS mydate, 
        cio
