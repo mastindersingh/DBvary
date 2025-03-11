@@ -1,3 +1,14 @@
+
+resource.type="k8s_container"
+jsonPayload.applicationName="vulnerability-jira-creator"
+jsonPayload.ENVIRONMENT="UAT"
+timestamp >= "2025-03-05T00:00:00Z"
+timestamp <= "2025-03-11T23:59:59Z"
+severity=CRITICAL
+
+
+
+
 import os
 import psycopg2
 import logging
