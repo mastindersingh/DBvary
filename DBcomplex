@@ -1,3 +1,41 @@
+
+def process_postgresql_kpi(kpi, db, current_date, next_date, kpi_tracking_data):
+    # Grab the query template from kpi["query_text"] or wherever you store it
+    query_template = kpi["query_text"]
+    
+    # Convert Python datetime objects to strings in your desired format
+    # e.g., "YYYY/MM/DD HH:MM"
+    start_str = current_date.strftime("%Y/%m/%d %H:%M")
+    end_str = next_date.strftime("%Y/%m/%d %H:%M")
+
+    # For the previous month date, do your own logic to compute it:
+    # Example:
+    prev_month = current_date.replace(day=1) - timedelta(days=1)
+    prev_month_date_str = prev_month.strftime("%Y/%m/%d %H:%M")
+
+    # Replace placeholders
+    query = (
+        query_template
+        .replace("{start_date}", start_str)
+        .replace("{end_date}", end_str)
+        .replace("{prev_month_date}", prev_month_date_str)
+    )
+
+    logger.info("Executing PostgreSQL query: %s", query)
+    results = db.execute_query(query)
+
+    # Process results as needed
+    for row in results:
+        # Adjust indexes to match your columns (APP_ID, DB_SERVICENOW_ID, etc.)
+        app_id = row[0]
+        db_servicenow_id = row[1]
+        report_date = row[2]
+        
+        # Append to tracking data
+
+
+
+
 def process_sql_server_kpi(kpi, mssql, current_date, next_date, kpi_tracking_data):
     """
     Process KPI data from SQL Server for a given date range.
