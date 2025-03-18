@@ -39,3 +39,36 @@ def process_sql_server_kpi(kpi, mssql, current_date, next_date, kpi_tracking_dat
     results = mssql.execute_query(query)
 
     return results
+
+
+
+SELECT
+    '{start_date}'::timestamp AS start_date,
+    '{end_date}'::timestamp AS end_date,
+    '{prev_month_start}'::timestamp AS prev_month_start,
+    "APP_ID",
+    "DB_SERVICENOW_ID",
+    "REPORT_DATE"
+FROM (
+    SELECT DISTINCT
+        "DB_SERVICENOW_ID",
+        "REPORT_DATE",
+        "ENCRYPTED",
+        "APP_ID",
+        "JIRA_TICKET_NUMBER"
+    FROM (
+        SELECT
+            FIRST_VALUE("REPORT_DATE") OVER (
+                PARTITION BY "DB_SERVICENOW_ID", "ENCRYPTED"
+                ORDER BY "REPORT_DATE" DESC
+            ) AS "REPORT_DATE",
+            "JIRA_TICKET_NUMBER",
+            "APP_ID"
+        FROM "PSI_AUTOMATION"."DATABASE_ENCRYPTION_HISTORY"
+        WHERE "REPORT_DATE" BETWEEN '{prev_month_start}' AND '{end_date}'
+          AND "JIRA_TICKET_NUMBER" IS NOT NULL
+    ) x
+) y
+WHERE "ENCRYPTED" = '1'
+  AND "REPORT_DATE" BETWEEN '{prev_month_start}' AND '{end_date}';
+
