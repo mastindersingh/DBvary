@@ -1,5 +1,420 @@
 
+"""
+main.py
 
+Example KPI automation script with placeholders for {prev_month_start}, {start_date}, and {end_date}
+in a PostgreSQL query, plus integration with SQL Server and JIRA.
+"""
+
+import os
+import logging
+import argparse
+from datetime import datetime, timedelta, timezone
+
+import psycopg2
+import pymssql
+from jira import JIRA, JIRAError
+from requests.exceptions import RequestException
+
+# Import load_config() from your config.py file
+from config import load_config
+
+# -------------------------------------------------------------------------
+# Logging Setup
+# -------------------------------------------------------------------------
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+# -------------------------------------------------------------------------
+# PostgreSQL Database Class
+# -------------------------------------------------------------------------
+class PostgreSQL:
+    """
+    Manages PostgreSQL database connections and operations.
+    """
+
+    def __init__(self, params):
+        """Initialize PostgreSQL connection using new config keys."""
+        try:
+            self.pg_conn = psycopg2.connect(
+                host=params["host"],
+                port=int(params["port"]),
+                dbname=params["dbname"],
+                user=params["user"],
+                password=params["password"]
+            )
+            logger.info("Connected to PostgreSQL successfully.")
+        except psycopg2.Error as err:
+            raise RuntimeError(f"Error connecting to PostgreSQL: {err}") from err
+
+    def fetch_kpi_measure_list(self):
+        """Fetch KPI queries from PostgreSQL (kpi_schema.kpi_measures)."""
+        try:
+            with self.pg_conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT kn.service_id, km.configuration_id, km.datasource_id,
+                           km.metric_name, km.query_text, kd.datasource_name
+                    FROM kpi_schema.kpi_service_names kn
+                    JOIN kpi_schema.kpi_measures km ON kn.service_id = km.service_id
+                    JOIN kpi_schema.kpi_datasources kd ON km.datasource_id = kd.datasource_id
+                    ORDER BY km.datasource_id ASC
+                """)
+                rows = cursor.fetchall()
+                return [
+                    {
+                        "service_id": row[0],
+                        "configuration_id": row[1],
+                        "datasource_id": row[2],
+                        "metric_name": row[3],
+                        "query_text": row[4],
+                        "datasource_name": row[5]
+                    }
+                    for row in rows
+                ]
+        except psycopg2.Error as err:
+            raise RuntimeError(f"Error fetching KPI measure list: {err}") from err
+
+    def execute_query(self, query):
+        """Execute a PostgreSQL query and return all rows."""
+        try:
+            with self.pg_conn.cursor() as cursor:
+                cursor.execute(query)
+                return cursor.fetchall()
+        except psycopg2.Error as err:
+            raise RuntimeError(f"Error executing PostgreSQL query: {err}") from err
+
+    def insert_kpi_tracking(self, data):
+        """
+        Insert KPI results into kpi_schema.kpi_tracking with an upsert (ON CONFLICT).
+        Each record is a tuple:
+            (service_id, configuration_id, application_id, metric_name, metric_value, startdt, end_dt)
+        """
+        try:
+            with self.pg_conn.cursor() as cursor:
+                insert_query = """
+                    INSERT INTO kpi_schema.kpi_tracking (
+                        service_id, configuration_id, application_id, metric_name, metric_value, startdt, end_dt
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (service_id, configuration_id, application_id, metric_name, startdt, end_dt)
+                    DO NOTHING;
+                """
+                for record in data:
+                    logger.info(f"Inserting record: {record}")
+                    cursor.execute(insert_query, record)
+                self.pg_conn.commit()
+                logger.info("Data inserted into kpi_tracking table successfully.")
+        except psycopg2.Error as err:
+            raise RuntimeError(f"Error inserting data into kpi_tracking table: {err}") from err
+
+    def close(self):
+        """Close PostgreSQL connection."""
+        if self.pg_conn:
+            self.pg_conn.close()
+            logger.info("PostgreSQL connection closed.")
+
+# -------------------------------------------------------------------------
+# MSSQL Database Class
+# -------------------------------------------------------------------------
+class MSSQLDatabase:
+    """
+    Manages MSSQL database connections and operations.
+    """
+
+    def __init__(self, params):
+        """Initialize MSSQL connection using datasource properties."""
+        try:
+            self.ms_conn = pymssql.connect(
+                server=f"{params['EFT_DATAMART_HOST']}:{params['EFT_DATAMART_PORT']}\\{params['EFT_DATAMART_INSTANCE']}",
+                user=f"AD-ENT\\{params['PISI_SERVICE_USER']}",
+                password=params["PISI_SERVICE_PASS"],
+                database=params["EFT_DATAMART_DB_NAME"]
+            )
+            logger.info("Connected to MSSQL successfully.")
+        except pymssql.Error as err:
+            raise RuntimeError(f"Error connecting to MSSQL: {err}") from err
+
+    def execute_query(self, query):
+        """Execute an MSSQL query and return all rows as dicts."""
+        try:
+            with self.ms_conn.cursor(as_dict=True) as cursor:
+                cursor.execute(query)
+                return cursor.fetchall()
+        except pymssql.Error as err:
+            raise RuntimeError(f"Error executing MSSQL query: {err}") from err
+
+    def close(self):
+        """Close MSSQL connection."""
+        if self.ms_conn:
+            self.ms_conn.close()
+            logger.info("MSSQL connection closed.")
+
+# -------------------------------------------------------------------------
+# Jira API Class
+# -------------------------------------------------------------------------
+class JiraAPI:
+    """
+    Manages JIRA API connections and operations.
+    """
+    MAX_RESULTS = 50
+
+    def __init__(self, server, token):
+        """Initialize Jira API connection."""
+        if server:
+            self.jira_conn = JIRA(server=server, token_auth=token)
+            logger.info(f"Connected to JIRA server: {server}")
+
+    def get_issues(self, jql, max_retries=3):
+        """Fetch issues from Jira with pagination and retries."""
+        start_at = 0
+        all_issues = []
+        retries = 0
+
+        while True:
+            try:
+                result = self.fetch_issues_with_jql(jql, start_at)
+                if not result:
+                    break
+                all_issues.extend(result)
+                if len(result) < self.MAX_RESULTS:
+                    break
+                start_at += self.MAX_RESULTS
+            except RequestException:
+                if retries < max_retries:
+                    retries += 1
+                    logger.info(f"Retrying... ({retries}/{max_retries})")
+                    continue
+                break
+            except JIRAError as e:
+                logger.error(f"JIRA error fetching issues: {e}")
+                break
+            except Exception as e:
+                logger.error(f"Error fetching issues: {e}")
+                break
+        return self.extract_issue_data(all_issues)
+
+    def fetch_issues_with_jql(self, jql, start_at):
+        """Fetch issues using JIRA library for a given JQL and start index."""
+        logger.info("Fetching issues with JQL: %s, start_at: %s", jql, start_at)
+        result = self.jira_conn.search_issues(
+            jql_str=jql,
+            maxResults=self.MAX_RESULTS,
+            startAt=start_at
+        )
+        if not result:
+            logger.info("No issues returned for JQL: %s, start_at: %s", jql, start_at)
+        return result
+
+    def extract_issue_data(self, all_issues):
+        """
+        Extract relevant fields from a list of JIRA issues.
+        Example: customfield_11400 as app ID, resolutiondate, etc.
+        """
+        data = []
+        for issue in all_issues:
+            if issue.fields.customfield_11400 is not None:
+                app_id = issue.fields.customfield_11400[0]
+                logger.info("Issue %s customfield_11400 value: %s", issue.key, issue.fields.customfield_11400)
+                data.append((issue.key, issue.fields.resolutiondate, app_id))
+            else:
+                logger.warning("Issue %s does not have customfield_11400", issue.key)
+        return data
+
+# -------------------------------------------------------------------------
+# KPI Processing Functions
+# -------------------------------------------------------------------------
+def process_kpi(kpi, db, mssql, jira_proxy, start_date, end_date):
+    """
+    Process KPI data for a given date range (day by day).
+    """
+    try:
+        kpi_tracking_data = []
+        current_date = start_date
+        while current_date <= end_date:
+            next_date = current_date + timedelta(days=1)
+            logger.info("Processing KPI: %s for date range %s to %s",
+                        kpi["metric_name"],
+                        current_date.strftime("%Y-%m-%d"),
+                        next_date.strftime("%Y-%m-%d"))
+
+            if kpi["datasource_name"] == "JIRA":
+                process_jira_kpi(kpi, jira_proxy, current_date, next_date, kpi_tracking_data)
+            elif kpi["datasource_name"] == "SQL Server":
+                process_sql_server_kpi(kpi, mssql, current_date, next_date, kpi_tracking_data)
+            elif kpi["datasource_name"] == "PostgreSQL":
+                # Compute previous month's start date
+                first_day_current_month = current_date.replace(day=1)
+                prev_month_start = first_day_current_month - timedelta(days=1)
+                prev_month_start = prev_month_start.replace(day=1, hour=0, minute=0,
+                                                            second=0, microsecond=0,
+                                                            tzinfo=timezone.utc)
+                process_postgresql_kpi(kpi, db, prev_month_start, current_date, next_date, kpi_tracking_data)
+
+            current_date = next_date
+
+        insert_kpi_tracking_data(db, kpi_tracking_data)
+    except (psycopg2.Error, pymssql.Error, JIRAError, RequestException) as e:
+        logger.error("Error processing KPI %s: %s", kpi["metric_name"], e)
+
+def process_jira_kpi(kpi, jira_proxy, current_date, next_date, kpi_tracking_data):
+    """
+    Process KPI data from JIRA for a given date range.
+    Replaces {start_date} and {end_date} in the JQL query.
+    """
+    jql_query = (kpi["query_text"]
+                 .replace("{start_date}", current_date.strftime("%Y/%m/%d %H:%M"))
+                 .replace("{end_date}", next_date.strftime("%Y/%m/%d %H:%M")))
+    logger.info("Processing JQL query: %s", jql_query)
+    issues = jira_proxy.get_issues(jql_query)
+
+    for issue in issues:
+        app_id = issue[2]
+        kpi_tracking_data.append((
+            kpi["service_id"],
+            kpi["configuration_id"],
+            app_id,
+            kpi["metric_name"],
+            issue[0],  # issue_key as metric_value
+            current_date,
+            next_date
+        ))
+
+def process_sql_server_kpi(kpi, mssql, current_date, next_date, kpi_tracking_data):
+    """
+    Process KPI data from SQL Server for a given date range.
+    Replaces {prev_month_start}, {start_date}, and {end_date}.
+    """
+    first_day_current_month = current_date.replace(day=1)
+    prev_month_start = first_day_current_month - timedelta(days=1)
+    prev_month_start = prev_month_start.replace(day=1, hour=0, minute=0,
+                                                second=0, microsecond=0, tzinfo=timezone.utc)
+
+    logger.info("Original SQL Server query: %s", kpi["query_text"])
+    query = (kpi["query_text"]
+             .replace("{start_date}", current_date.strftime("%Y/%m/%d %H:%M"))
+             .replace("{end_date}", next_date.strftime("%Y/%m/%d %H:%M"))
+             .replace("{prev_month_start}", prev_month_start.strftime("%Y/%m/%d %H:%M")))
+    logger.info("Modified SQL Server query: %s", query)
+
+    results = mssql.execute_query(query)
+    for row in results:
+        kpi_tracking_data.append((
+            kpi["service_id"],
+            kpi["configuration_id"],
+            row["DISTRIBUTED_APP_ID"],
+            kpi["metric_name"],
+            row["PROBLEM_NUMBER"],
+            current_date,
+            next_date
+        ))
+
+def process_postgresql_kpi(kpi, db, prev_month_start, current_date, next_date, kpi_tracking_data):
+    """
+    Process KPI data from PostgreSQL for a given date range.
+    Replaces {prev_month_start}, {start_date}, and {end_date}.
+    """
+    logger.info("Original PostgreSQL query: %s", kpi["query_text"])
+    prev_str = prev_month_start.strftime("%Y-%m-%d %H:%M:%S")
+    start_str = current_date.strftime("%Y-%m-%d %H:%M:%S")
+    end_str = next_date.strftime("%Y-%m-%d %H:%M:%S")
+
+    query = (kpi["query_text"]
+             .replace("{prev_month_start}", prev_str)
+             .replace("{start_date}", start_str)
+             .replace("{end_date}", end_str))
+    logger.info("Modified PostgreSQL query: %s", query)
+
+    results = db.execute_query(query)
+    for row in results:
+        app_id = row[0]
+        metric_value = row[1]  # Adjust indexing as necessary
+        kpi_tracking_data.append((
+            kpi["service_id"],
+            kpi["configuration_id"],
+            app_id,
+            kpi["metric_name"],
+            metric_value,
+            current_date,
+            next_date
+        ))
+
+def insert_kpi_tracking_data(db, kpi_tracking_data):
+    """
+    Insert KPI tracking data into the PostgreSQL tracking table.
+    """
+    if kpi_tracking_data:
+        db.insert_kpi_tracking(kpi_tracking_data)
+
+# -------------------------------------------------------------------------
+# Main Execution Function
+# -------------------------------------------------------------------------
+def main_execution(start_date=None, end_date=None):
+    db = None
+    mssql = None
+    try:
+        # 1. Load configuration from config.py using load_config()
+        config = load_config()
+
+        # 2. Connect to PostgreSQL using config["PostgreSQL"]
+        db = PostgreSQL({
+            "host": config["PostgreSQL"]["host"],
+            "port": config["PostgreSQL"]["port"],
+            "dbname": config["PostgreSQL"]["dbname"],
+            "user": config["PostgreSQL"]["user"],
+            "password": config["PostgreSQL"]["password"]
+        })
+
+        # 3. Connect to SQL Server using properties from config["datasources"]["SQL Server"]
+        sqlsrv_props = config["datasources"].get("SQL Server", {})
+        if not sqlsrv_props.get("PISI_SERVICE_PASS"):
+            raise RuntimeError("Password for MSSQL user 'PISIAUTOMATION' is not set.")
+        mssql = MSSQLDatabase({
+            "EFT_DATAMART_HOST": sqlsrv_props.get("EFT_DATAMART_HOST"),
+            "EFT_DATAMART_PORT": sqlsrv_props.get("EFT_DATAMART_PORT"),
+            "EFT_DATAMART_INSTANCE": sqlsrv_props.get("EFT_DATAMART_INSTANCE"),
+            "PISI_SERVICE_USER": sqlsrv_props.get("PISI_SERVICE_USER"),
+            "PISI_SERVICE_PASS": sqlsrv_props.get("PISI_SERVICE_PASS"),
+            "EFT_DATAMART_DB_NAME": sqlsrv_props.get("EFT_DATAMART_DB_NAME")
+        })
+
+        # 4. Connect to JIRA; values can come from environment variables or be hardcoded
+        jira_endpoint = os.getenv("JIRA_ENDPOINT", "https://your_jira_instance.atlassian.net")
+        jira_token = os.getenv("JIRA_TOKEN", "your_jira_token_here")
+        jira_proxy = JiraAPI(jira_endpoint, jira_token)
+
+        # 5. Determine the date range
+        if start_date and end_date:
+            current_date_obj = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        else:
+            today = datetime.now(timezone.utc)
+            current_date_obj = today - timedelta(days=1)
+            end_date_obj = today.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # 6. Fetch KPI configurations from PostgreSQL
+        kpi_measure_list = db.fetch_kpi_measure_list()
+
+        # 7. Process each KPI
+        for kpi in kpi_measure_list:
+            process_kpi(kpi, db, mssql, jira_proxy, current_date_obj, end_date_obj)
+
+    except (psycopg2.Error, pymssql.Error, JIRAError, RequestException) as main_error:
+        logger.error("Fatal error: %s", main_error)
+    finally:
+        if db:
+            db.close()
+        if mssql:
+            mssql.close()
+        logger.info("Database connections closed.")
+
+# -------------------------------------------------------------------------
+# Entry Point
+# -------------------------------------------------------------------------
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="KPI Automation Script")
+    parser.add_argument("--start_date", type=str, help="Start date in YYYY-MM-DD format")
+    parser.add_argument("--end_date", type=str, help="End date in YYYY-MM-DD format")
+    args = parser.parse_args()
+    main_execution(args.start_date, args.end_date)
 """
 main.py
 
