@@ -1,4 +1,47 @@
 
+SELECT
+    '{start_date}'::timestamp      AS start_date,
+    '{end_date}'::timestamp        AS end_date,
+    (
+      DATE_TRUNC('month', '{start_date}'::timestamp) 
+      - INTERVAL '1 month'
+    )                              AS prev_month_start,
+    "APP_ID",
+    "DB_SERVICENOW_ID",
+    "REPORT_DATE"
+FROM (
+    SELECT DISTINCT
+        "DB_SERVICENOW_ID",
+        "REPORT_DATE",
+        "ENCRYPTED",
+        "APP_ID",
+        "JIRA_TICKET_NUMBER"
+    FROM (
+        SELECT
+            FIRST_VALUE("REPORT_DATE") OVER (
+                PARTITION BY "DB_SERVICENOW_ID", "ENCRYPTED"
+                ORDER BY "REPORT_DATE" DESC
+            ) AS "REPORT_DATE",
+            "JIRA_TICKET_NUMBER",
+            "APP_ID"
+        FROM "PSI_AUTOMATION"."DATABASE_ENCRYPTION_HISTORY"
+        WHERE "REPORT_DATE" BETWEEN
+              (
+                DATE_TRUNC('month', '{start_date}'::timestamp) 
+                - INTERVAL '1 month'
+              )
+              AND '{end_date}'::timestamp
+          AND "JIRA_TICKET_NUMBER" IS NOT NULL
+    ) AS x
+) AS y
+WHERE y."ENCRYPTED" = '1'
+  AND "REPORT_DATE" BETWEEN '{start_date}'::timestamp AND '{end_date}'::timestamp;
+
+
+
+
+
+
 """
 main.py
 
