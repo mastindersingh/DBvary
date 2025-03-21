@@ -1,4 +1,9 @@
 
+python main.py --start_date YYYY-MM-DD --end_date YYYY-MM-DD
+
+
+
+
 SELECT
     '{start_date}'::timestamp      AS start_date,
     '{end_date}'::timestamp        AS end_date,
